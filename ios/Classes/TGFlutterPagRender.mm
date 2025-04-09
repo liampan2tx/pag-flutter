@@ -188,7 +188,44 @@ static int64_t GetCurrentTimeUS() {
 
 - (void)update
 {
-    _frameUpdateCallback();
+    // 异步的话会出现跳帧 pag较大时性能差的机制 渲染较慢 没渲染完之后被覆盖 主线程渲染真机下能接受且app更注重效果
+    // 故选择主线程 多pag场景中使用webp
+//    int64_t duration = [self->_player duration];
+//    if(duration <= 0){
+//        duration = 1;
+//    }
+//
+//    int64_t timestamp = GetCurrentTimeUS();
+//    if(self->start <= 0){
+//        self->start = timestamp;
+//    }
+//    auto count = (timestamp - self->start) / duration;
+//    double value = 0;
+//    if (self->_repeatCount >= 0 && count >= self->_repeatCount) {
+//        value = 1;
+//        if(!self->_endEvent){
+//            self->_endEvent = YES;
+//            self->_eventCallback(EventEnd);
+//        }
+//    } else {
+//        self->_endEvent = NO;
+//        double playTime = (timestamp - self->start) % duration;
+//        value = static_cast<double>(playTime) / duration;
+//        if (self->_currRepeatCount < count) {
+//            self->_currRepeatCount = count;
+//            self->_eventCallback(EventRepeat);
+//        }
+//    }
+//    [self->_player setProgress:value];
+//    __weak typeof(self) weakSelf = self;
+//    [[TGFlutterWorkerExecutor sharedInstance] post:^(){
+//        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+//            [self->_player flush];
+//        });
+//        self->_frameUpdateCallback();
+//    }];
+    
+    self->_frameUpdateCallback();
 }
 
 - (void)invalidateDisplayLink {
