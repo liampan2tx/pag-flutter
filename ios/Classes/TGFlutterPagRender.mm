@@ -16,6 +16,7 @@
 #include <libpag/PAGPlayer.h>
 #include <chrono>
 #include <mutex>
+#include <atomic>
 
 @interface TGFlutterPagRender()
 
@@ -48,10 +49,19 @@ static int64_t GetCurrentTimeUS() {
     int _repeatCount;
     int64_t start;
     int64_t _currRepeatCount;
+    std::atomic<bool> _released;  // 原子标志位，标记资源是否已被释放/正在释放
 }
 
 - (CVPixelBufferRef)copyPixelBuffer {
-    
+    // 原子标志位检查：如果资源已被标记释放，直接返回，避免访问无效对象
+    if (_released.load(std::memory_order_acquire)) {
+        return NULL;
+    }
+
+    if (!_player || !_surface) {
+        return NULL;
+    }
+
     int64_t duration = [_player duration];
     if(duration <= 0){
         duration = 1;
@@ -81,7 +91,9 @@ static int64_t GetCurrentTimeUS() {
     [_player setProgress:value];
     [_player flush];
     CVPixelBufferRef target = [_surface getCVPixelBuffer];
-    CVBufferRetain(target);
+    if (target) {
+        CVBufferRetain(target);
+    }
     return target;
 }
 
@@ -89,6 +101,7 @@ static int64_t GetCurrentTimeUS() {
 {
     if (self = [super init]) {
         _textureId = @-1;
+        _released = false;
     }
     return self;
 }
@@ -105,7 +118,9 @@ static int64_t GetCurrentTimeUS() {
         if ([[TGFlutterWorkerExecutor sharedInstance] enableMultiThread]) {
             // 防止setup和release、dealloc并行争抢
             @synchronized(self) {
-                [self setUpPlayerWithPagData:pagData];
+                if(self){
+                    [self setUpPlayerWithPagData:pagData];
+                }
             }
         } else{
             [self setUpPlayerWithPagData:pagData];
@@ -115,6 +130,8 @@ static int64_t GetCurrentTimeUS() {
 
 - (void) setUpPlayerWithPagData:(NSData*)pagData
 {
+    // 重置标志位，标记资源可用（支持对象复用场景）
+    _released.store(false, std::memory_order_release);
     _pagFile = [PAGFile Load:pagData.bytes size:pagData.length];
     if (!_player) {
         _player = [[PAGPlayer alloc] init];
@@ -145,8 +162,10 @@ static int64_t GetCurrentTimeUS() {
         [_displayLink invalidate];
         _displayLink = nil;
     }
-    [_player setProgress:_initProgress];
-    [_player flush];
+    if (!_released.load(std::memory_order_acquire) && _player) {
+        [_player setProgress:_initProgress];
+        [_player flush];
+    }
     _frameUpdateCallback();
     if(!_endEvent){
         _endEvent = YES;
@@ -166,12 +185,17 @@ static int64_t GetCurrentTimeUS() {
 }
 
 - (void)setProgress:(double)progress{
-    [_player setProgress:progress];
-    [_player flush];
+    if (!_released.load(std::memory_order_acquire) && _player) {
+        [_player setProgress:progress];
+        [_player flush];
+    }
     _frameUpdateCallback();
 }
 
 - (NSArray<NSString *> *)getLayersUnderPoint:(CGPoint)point{
+    if (_released.load(std::memory_order_acquire) || !_player) {
+        return @[];
+    }
     NSArray<PAGLayer*>* layers = [_player getLayersUnderPoint:point];
     NSMutableArray<NSString *> *layerNames = [[NSMutableArray alloc] init];
     for (PAGLayer *layer in layers) {
@@ -197,11 +221,16 @@ static int64_t GetCurrentTimeUS() {
 }
 
 - (void)clearSurface {
+    // 先标记为已释放，raster 线程的 copyPixelBuffer 会在操作前检查此标志
+    _released.store(true, std::memory_order_release);
+
     if (_surface) {
         if ([[TGFlutterWorkerExecutor sharedInstance] enableMultiThread]) {
             @synchronized(self) {
-                [_surface freeCache];
-                [_surface clearAll];
+                if (_surface){
+                    [_surface freeCache];
+                    [_surface clearAll];
+                }
             }
         } else{
             [_surface freeCache];
@@ -210,11 +239,26 @@ static int64_t GetCurrentTimeUS() {
     }
 }
 
+/// 清除Pagrender时序
+- (void)clearPagState {
+    if ([[TGFlutterWorkerExecutor sharedInstance] enableMultiThread]) {
+        @synchronized(self) {
+            start = -1;
+            _endEvent = NO;
+        }
+    } else{
+        start = -1;
+        _endEvent = NO;
+    }
+}
+
 - (void)dealloc {
+    // 先标记为已释放，阻止 raster 线程继续操作
+    _released.store(true, std::memory_order_release);
     _frameUpdateCallback = nil;
     _eventCallback = nil;
     _surface = nil;
-    self.pagFile = nil;
-    self.player = nil;
+    _pagFile = nil;
+    _player = nil;
 }
 @end
